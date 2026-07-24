@@ -26,7 +26,7 @@ azurelaunch/
 
 ---
 
-## CI/CD Flow Diagram
+## CI/CD Flow Diagrams
 
 > Open [`docs/pipeline.html`](docs/pipeline.html) in a browser for a live animated version of this pipeline.
 
