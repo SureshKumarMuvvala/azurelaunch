@@ -17,7 +17,7 @@ azurelaunch/
 │   ├── nginx.conf
 │   └── Dockerfile
 ├── scripts/
-│   └── azure-setup.sh     # One-time Azure infra setup
+│   └── azure-setup.sh     # Reference only — run commands manually
 ├── .github/workflows/
 │   ├── ci.yml             # Build + smoke test on every push/PR
 │   └── cd.yml             # Push images to ACR on merge to main
@@ -26,7 +26,7 @@ azurelaunch/
 
 ---
 
-## CI/CD Flow Diagrams
+## CI/CD Flow Diagram
 
 > Open [`docs/pipeline.html`](docs/pipeline.html) in a browser for a live animated version of this pipeline.
 
@@ -55,7 +55,7 @@ Local Dev  ──git push──►  GitHub Repo (main)
                                             │
                                             ▼
                                   Azure Container Registry
-                                  azurelaunchacr.azurecr.io
+                                  azurelaunchacr10033.azurecr.io
 ```
 
 | Step | What happens |
@@ -75,7 +75,7 @@ Images are tagged with both `latest` and the git commit SHA for full traceabilit
 
 1. Go to [azure.microsoft.com/free](https://azure.microsoft.com/free)
 2. Click **Start free** and sign in with a Microsoft account (or create one)
-3. You get **$200 free credit** for 30 days — more than enough for this task
+3. You get **$200 free credit** for 30 days
 4. Once signed in, go to [portal.azure.com](https://portal.azure.com) to confirm your account is active
 5. Note your **Subscription ID** — you'll need it in Step 4
    - In Azure Portal → search **Subscriptions** → copy the Subscription ID
@@ -89,10 +89,13 @@ Images are tagged with both `latest` and the git commit SHA for full traceabilit
 brew install azure-cli
 ```
 
-**Windows:**
-```bash
+**Windows (recommended):**
+```powershell
 winget install Microsoft.AzureCLI
 ```
+
+**Windows (alternative — download MSI):**
+Go to https://aka.ms/installazurecliwindows and run the installer.
 
 **Linux (Ubuntu/Debian):**
 ```bash
@@ -104,60 +107,79 @@ Verify it worked:
 az --version
 ```
 
+> ⚠️ **Windows users** — after installing, fully close and reopen your terminal (PowerShell, Git Bash, or Cursor). The PATH only updates on terminal restart.
+
+> ⚠️ **Cursor terminal users** — if `az` works in standalone PowerShell but not in Cursor, run this in Cursor's terminal:
+> ```powershell
+> # Find where az is installed (run in working PowerShell first)
+> (Get-Command az).Source
+> # Then add that folder to PATH in Cursor terminal e.g.
+> $env:PATH += ';C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin'
+> ```
+> To fix permanently, add that path via System Properties → Environment Variables → PATH, then restart Cursor.
+
+---
+
 ### 3. Login to Azure via CLI
 
 ```bash
 az login
 ```
 
-This opens a browser — sign in with the same account you used to create the Azure account.
+This opens a browser — sign in with the same account used to create the Azure account.
+
 Confirm login worked:
 ```bash
 az account show
 ```
 
-You should see your subscription name and ID printed.
+You should see your subscription name, ID and state printed.
+
+---
+
+### 4. Register Azure Container Registry provider
+
+> ⚠️ New Azure subscriptions need this — skip if you've used ACR before.
+
+```bash
+az provider register --namespace Microsoft.ContainerRegistry --wait
+```
+
+Verify:
+```bash
+az provider show --namespace Microsoft.ContainerRegistry --query registrationState
+```
+
+Should print `"Registered"`.
 
 ---
 
 ## Step 0 — Create Project Folder Structure
 
-```bash
-# Create root project folder
-mkdir azurelaunch
-cd azurelaunch
-
-# Create subfolders
-mkdir backend
-mkdir frontend
-mkdir scripts
-mkdir -p .github/workflows
-
-# Create all the files (copy contents from this repo)
-touch backend/main.py
-touch backend/Dockerfile
-touch frontend/index.html
-touch frontend/nginx.conf
-touch frontend/Dockerfile
-touch scripts/azure-setup.sh
-touch .github/workflows/ci.yml
-touch .github/workflows/cd.yml
-touch .gitignore
-```
-
-**Or** in just 2 commands:
-
+**Mac/Linux/Git Bash:**
 ```bash
 mkdir -p azurelaunch/{backend,frontend,scripts,.github/workflows}
 cd azurelaunch && touch backend/{main.py,Dockerfile} frontend/{index.html,nginx.conf,Dockerfile} scripts/azure-setup.sh .github/workflows/{ci.yml,cd.yml} .gitignore
 ```
 
-Your folder should look like this before moving to Step 1:
+**Or step by step (works everywhere including PowerShell):**
+```powershell
+mkdir azurelaunch
+cd azurelaunch
+mkdir backend
+mkdir frontend
+mkdir scripts
+mkdir .github\workflows
+```
 
+> ⚠️ **Windows/PowerShell users** — brace expansion `{backend,frontend}` is bash only and will error in PowerShell. Use the step by step commands above instead.
+
+Your folder should look like this:
 ```
 azurelaunch/
 ├── backend/
 │   ├── main.py
+│   ├── pyproject.toml
 │   └── Dockerfile
 ├── frontend/
 │   ├── index.html
@@ -172,6 +194,8 @@ azurelaunch/
 └── .gitignore
 ```
 
+> ⚠️ There are **2 Dockerfiles** — one in `backend/` for FastAPI and one in `frontend/` for nginx. Make sure both exist before pushing.
+
 ---
 
 ## Step 1 — Create Virtual Environment (local dev)
@@ -181,23 +205,34 @@ azurelaunch/
 pip install uv
 
 cd backend
-uv init                           # creates pyproject.toml (already exists here)
-uv add fastapi uvicorn            # adds deps + creates uv.lock automatically
-uv run uvicorn main:app --reload  # runs app — no activate needed!
+
+# Use --no-vcs flag to prevent uv from creating a nested git repo
+uv init --no-vcs
+
+uv add fastapi uvicorn
+uv run uvicorn main:app --reload    # → http://localhost:8000
 ```
 
-No `requirements.txt` needed — `uv` manages everything via `pyproject.toml` and `uv.lock`.
+> ⚠️ **Important** — always use `uv init --no-vcs` inside an existing git repo. Without it, `uv init` creates its own `.git` folder inside `backend/` which causes this error when you run `git add .`:
+> ```
+> error: 'backend/' does not have a commit checked out
+> fatal: adding files failed
+> ```
+> If this happens, fix it with: `rm -rf backend/.git`
 
-Test endpoints:
+> ⚠️ **pyproject.toml** — make sure `requires-python = ">=3.11"` matches the Python version in your Dockerfile. If `uv init` sets it to `>=3.12` but Dockerfile uses `python:3.11-slim`, the Docker build will fail with a dependency resolution error.
+
+Test endpoints locally:
 - `http://localhost:8000/`        → Hello to my world!
 - `http://localhost:8000/health`  → {"status":"healthy"}
-- `http://localhost:8000/version` → {"version":"1.0.0",...}
+- `http://localhost:8000/version` → {"version":"1.0.0"}
 - `http://localhost:8000/docs`    → FastAPI auto-generated docs
 
 ---
 
 ## Step 2 — Create GitHub Repo
 
+**Option A — GitHub CLI:**
 ```bash
 cd ..   # back to project root
 git init
@@ -206,25 +241,139 @@ git commit -m "Initial commit — AzureLaunch"
 gh repo create azurelaunch --public --push --source=.
 ```
 
-Or create manually on github.com and push.
+> ⚠️ If `gh` command not found, install GitHub CLI: `winget install GitHub.cli` then restart terminal and run `gh auth login`
+
+**Option B — Manual (no GitHub CLI needed):**
+1. Go to [github.com/new](https://github.com/new)
+2. Name it `azurelaunch`, set to **Public**
+3. **Do NOT** tick Add README, Add .gitignore — leave everything unchecked
+4. Click **Create repository**
+5. Run the commands GitHub shows under "push an existing repository":
+```bash
+git init
+git add .
+git commit -m "Initial commit — AzureLaunch"
+git remote add origin https://github.com/YOUR_USERNAME/azurelaunch.git
+git branch -M main
+git push -u origin main
+```
 
 ---
 
-## Step 3 — Create GitHub Actions
+## Step 3 — Azure Infrastructure Setup
 
-The workflows are already in `.github/workflows/`:
+Run these commands one by one. Replace placeholder values with your own.
 
-- **ci.yml** — runs on every push/PR: builds Docker images and smoke tests all endpoints
-- **cd.yml** — runs on merge to main: pushes images to Azure Container Registry
+```bash
+# Set your subscription
+SUBSCRIPTION_ID="YOUR_SUBSCRIPTION_ID"
+az account set --subscription "$SUBSCRIPTION_ID"
 
-Add these **5 secrets** to your GitHub repo  
-(Settings → Secrets and variables → Actions → New repository secret):
+# Create resource group
+az group create --name azurelaunch-rg --location eastus
+
+# Create Azure Container Registry (name must be alphanumeric only, 5-50 chars, no hyphens)
+az acr create --resource-group azurelaunch-rg --name azurelaunchacr$RANDOM --sku Basic --admin-enabled false
+
+# Note the ACR name printed — you'll need it below
+ACR_NAME="azurelaunchacr12345"   # replace with actual name from above
+```
+
+> ⚠️ **ACR name rules** — alphanumeric only, no hyphens, underscores or dots. `azurelaunch-acr` will fail. Use `azurelaunchacr` instead.
+
+> ⚠️ **If ACR creation fails** with `MissingSubscriptionRegistration`, register the provider first:
+> ```bash
+> az provider register --namespace Microsoft.ContainerRegistry --wait
+> ```
+
+```bash
+# Create App Registration for GitHub Actions
+APP_ID=$(az ad app create --display-name "azurelaunch-github-actions" --query appId --output tsv)
+echo "App ID: $APP_ID"
+
+# Create Service Principal
+SP_OBJ_ID=$(az ad sp create --id $APP_ID --query id --output tsv)
+echo "SP Object ID: $SP_OBJ_ID"
+```
+
+> ⚠️ If you see `service principal name App id is already in use`, the app already exists from a previous run. Fetch it instead:
+> ```bash
+> APP_ID=$(az ad app list --display-name "azurelaunch-github-actions" --query "[0].appId" --output tsv)
+> SP_OBJ_ID=$(az ad sp show --id $APP_ID --query id --output tsv)
+> ```
+
+```bash
+# Get resource IDs
+RG_ID=$(az group show --name azurelaunch-rg --query id --output tsv)
+ACR_ID=$(az acr show --name $ACR_NAME --query id --output tsv)
+```
+
+### Assign Roles (Azure Portal — recommended)
+
+> ⚠️ Role assignment via CLI can fail with `MissingSubscription` errors. Use the Portal instead — it's more reliable.
+
+**Contributor on Resource Group:**
+1. Portal → Resource Groups → azurelaunch-rg
+2. Left menu → Access control (IAM) → Add → Add role assignment
+3. Tab: **Privileged administrator roles** → select **Contributor** → Next
+4. Members → Select members → search `azurelaunch-github-actions` → Select
+5. Review + assign twice
+
+**AcrPush on Container Registry:**
+1. Portal → Container registries → your ACR
+2. Left menu → Access control (IAM) → Add → Add role assignment
+3. Search **AcrPush** → select → Next
+4. Members → Select members → search `azurelaunch-github-actions` → Select
+5. Review + assign twice
+
+### Set up OIDC Federated Credential
+
+```bash
+# Get your GitHub username and check your actual repo subject format
+# Replace YOUR_GITHUB_USERNAME with your actual username
+az ad app federated-credential create --id $APP_ID --parameters "{\"name\": \"github-main\", \"issuer\": \"https://token.actions.githubusercontent.com\", \"subject\": \"repo:YOUR_GITHUB_USERNAME/azurelaunch:ref:refs/heads/main\", \"audiences\": [\"api://AzureADTokenExchange\"]}"
+```
+
+> ⚠️ **OIDC subject mismatch** — if CD fails with `AADSTS700213: No matching federated identity record`, check the exact subject claim GitHub is sending in the workflow logs under `Run azure/login`. Copy that exact string and use it as the subject. Example:
+> ```
+> subject claim - repo:username@12345/reponame@67890:ref:refs/heads/main
+> ```
+> Delete and recreate the credential with that exact subject:
+> ```bash
+> az ad app federated-credential delete --id $APP_ID --federated-credential-id github-main
+> az ad app federated-credential create --id $APP_ID --parameters "{\"name\": \"github-main\", \"issuer\": \"https://token.actions.githubusercontent.com\", \"subject\": \"EXACT_SUBJECT_FROM_LOGS\", \"audiences\": [\"api://AzureADTokenExchange\"]}"
+> ```
+
+### Print GitHub Secrets
+
+```bash
+TENANT_ID=$(az account show --query tenantId --output tsv)
+ACR_LOGIN_SERVER=$(az acr show --name $ACR_NAME --query loginServer --output tsv)
+
+echo "====== ADD THESE TO GITHUB SECRETS ======"
+echo "AZURE_CLIENT_ID       = $APP_ID"
+echo "AZURE_TENANT_ID       = $TENANT_ID"
+echo "AZURE_SUBSCRIPTION_ID = $SUBSCRIPTION_ID"
+echo "ACR_NAME              = $ACR_NAME"
+echo "ACR_LOGIN_SERVER      = $ACR_LOGIN_SERVER"
+echo "=========================================="
+```
+
+> ⚠️ **These values are sensitive** — do not commit them to your repo, share them in chat, or save them in plain text files. Only add them to GitHub Secrets.
+
+---
+
+## Step 3 — Add GitHub Secrets
+
+Go to `https://github.com/YOUR_USERNAME/azurelaunch/settings/secrets/actions`
+
+Click **New repository secret** for each:
 
 | Secret | Value |
 |---|---|
-| `AZURE_CLIENT_ID` | From azure-setup.sh output |
-| `AZURE_TENANT_ID` | From azure-setup.sh output |
-| `AZURE_SUBSCRIPTION_ID` | Your Azure subscription ID |
+| `AZURE_CLIENT_ID` | from output above |
+| `AZURE_TENANT_ID` | from output above |
+| `AZURE_SUBSCRIPTION_ID` | your subscription ID |
 | `ACR_NAME` | e.g. `azurelaunchacr12345` |
 | `ACR_LOGIN_SERVER` | e.g. `azurelaunchacr12345.azurecr.io` |
 
@@ -232,20 +381,48 @@ Add these **5 secrets** to your GitHub repo
 
 ## Step 4 — Deploy to ACR
 
-```bash
-# One-time Azure setup (edit variables at top of script first)
-chmod +x scripts/azure-setup.sh
-./scripts/azure-setup.sh
+Push to main to trigger the CD pipeline:
 
-# Then push to main to trigger the CD pipeline
+```bash
+git add .
+git commit -m "Initial commit — AzureLaunch"
 git push origin main
 ```
 
-The CD workflow will:
-1. Login to Azure (OIDC — no password needed)
-2. Build the backend Docker image
-3. Push to ACR with your commit SHA as the tag
-4. Build the frontend Docker image
-5. Push to ACR
+Go to your GitHub repo → **Actions** tab and watch the workflows run.
 
-Your images will be visible in Azure Portal → Container Registry → Repositories.
+**CI workflow** should show all green:
+- ✅ Build backend Docker image
+- ✅ Smoke test GET / /health /version
+- ✅ Build frontend Docker image
+- ✅ Smoke test frontend /health
+
+**CD workflow** should show all green:
+- ✅ Login to Azure
+- ✅ Login to ACR
+- ✅ Build + push backend image
+- ✅ Build + push frontend image
+
+**Verify images landed in ACR:**
+```bash
+az acr repository list --name $ACR_NAME --output table
+az acr repository show-tags --name $ACR_NAME --repository azurelaunch-backend --output table
+az acr repository show-tags --name $ACR_NAME --repository azurelaunch-frontend --output table
+```
+
+Or in Azure Portal → Container registries → your ACR → Repositories.
+
+---
+
+## Common Errors & Fixes
+
+| Error | Fix |
+|---|---|
+| `az: command not found` in Cursor | Add Azure CLI to PATH: `$env:PATH += ';C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin'` |
+| `MissingSubscriptionRegistration` | Run `az provider register --namespace Microsoft.ContainerRegistry --wait` |
+| `MissingSubscription` on role assignment | Use Azure Portal IAM instead of CLI |
+| `Registry names may contain only alphanumeric` | Remove hyphens/underscores from ACR name |
+| `backend/ does not have a commit checked out` | Run `rm -rf backend/.git` — caused by `uv init` without `--no-vcs` |
+| `No solution found when resolving dependencies` | Set `requires-python = ">=3.11"` in pyproject.toml to match Dockerfile |
+| `AADSTS700213 No matching federated identity` | Check exact subject claim in workflow logs and recreate federated credential with that exact string |
+| Brace expansion error in PowerShell | Use individual `mkdir` commands instead of `mkdir -p {a,b,c}` |
