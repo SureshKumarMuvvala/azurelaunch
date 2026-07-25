@@ -28,7 +28,7 @@ azurelaunch/
 
 ## CI/CD Flow Diagram
 
-> Open [`docs/pipeline.html`](docs/pipeline.html) in a browser for a live animated version of this pipeline.
+![AzureLaunch CI/CD Pipeline](docs/pipeline.svg)
 
 ## CI/CD Flow Diagram (ASCII)
 
@@ -426,3 +426,117 @@ Or in Azure Portal → Container registries → your ACR → Repositories.
 | `No solution found when resolving dependencies` | Set `requires-python = ">=3.11"` in pyproject.toml to match Dockerfile |
 | `AADSTS700213 No matching federated identity` | Check exact subject claim in workflow logs and recreate federated credential with that exact string |
 | Brace expansion error in PowerShell | Use individual `mkdir` commands instead of `mkdir -p {a,b,c}` |
+
+---
+
+## Container Apps Deployment (Auto-deploy via CD)
+
+Once the one-time setup is done, every `git push` to main automatically:
+1. Builds and pushes images to ACR
+2. Deploys to Azure Container Apps
+3. Smoke tests the live URLs
+
+### One-time Container Apps Setup
+
+Edit the variables at the top of `scripts/setup-container-apps.sh` then run:
+
+```bash
+chmod +x scripts/setup-container-apps.sh
+./scripts/setup-container-apps.sh
+```
+
+> ⚠️ The `az containerapp env create` step takes **5–10 minutes** — this is normal. Do not cancel it. It is provisioning a full Kubernetes-based environment underneath.
+
+> ⚠️ If it fails with `MissingSubscription`, run `az account set --subscription "YOUR_SUBSCRIPTION_ID"` first.
+
+---
+
+### Fix Frontend → Backend Connection
+
+After deploying to Container Apps, clicking **Ping AzureLaunch API** on the frontend will show `Error: Failed to fetch` because the frontend defaults to `localhost:8000`.
+
+**Step 1 — Get your backend FQDN:**
+```bash
+az containerapp show \
+  --name azurelaunch-backend \
+  --resource-group azurelaunch-rg \
+  --query properties.configuration.ingress.fqdn \
+  --output tsv
+```
+
+**Step 2 — Update `frontend/index.html`:**
+
+Find this line:
+```javascript
+const BACKEND = window.BACKEND_URL || 'https://REPLACE_WITH_YOUR_BACKEND_FQDN';
+```
+
+Replace with your actual backend URL:
+```javascript
+const BACKEND = window.BACKEND_URL || 'https://azurelaunch-backend.kindriver-e93cab17.eastus.azurecontainerapps.io';
+```
+
+**Step 3 — Push to trigger auto-deploy:**
+```bash
+git add frontend/index.html
+git commit -m "fix: set live backend URL"
+git push origin main
+```
+
+Wait for CD pipeline to go green (~3 mins) then open your frontend and click **Ping AzureLaunch API**.
+
+---
+
+### Live URLs
+
+| Service | URL |
+|---|---|
+| Backend | https://azurelaunch-backend.kindriver-e93cab17.eastus.azurecontainerapps.io |
+| Frontend | https://azurelaunch-frontend.kindriver-e93cab17.eastus.azurecontainerapps.io |
+
+### Verify deployment
+
+```bash
+# Check backend is live
+curl https://azurelaunch-backend.kindriver-e93cab17.eastus.azurecontainerapps.io/health
+
+# Check frontend is live  
+curl https://azurelaunch-frontend.kindriver-e93cab17.eastus.azurecontainerapps.io/health
+
+# List all images in ACR
+az acr repository list --name azurelaunchacr10033 --output table
+
+# Check Container App status
+az containerapp show --name azurelaunch-backend --resource-group azurelaunch-rg --query properties.runningStatus --output tsv
+az containerapp show --name azurelaunch-frontend --resource-group azurelaunch-rg --query properties.runningStatus --output tsv
+```
+
+---
+
+## Full Architecture
+
+```
+Developer Machine
+  └── uv init --no-vcs
+  └── uv add fastapi uvicorn
+  └── git push origin main
+          │
+          ▼
+    GitHub Actions
+      ├── CI (ci.yml)
+      │     └── build + smoke test locally
+      │
+      └── CD (cd.yml)
+            ├── Job 1: Build + push to ACR
+            │         azurelaunchacr10033.azurecr.io
+            │         :latest + :<git-sha>
+            │
+            ├── Job 2: Deploy to Container Apps
+            │         az containerapp update backend
+            │         az containerapp update frontend
+            │
+            └── Job 3: Smoke test live URLs
+                      GET /health ✅
+                      GET /       ✅
+                      GET /version ✅
+```
