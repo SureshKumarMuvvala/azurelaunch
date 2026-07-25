@@ -13,17 +13,24 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4.3.0
 
       # ── Build backend ──────────────────────────
       - name: Build backend Docker image
-        run: docker build -t hello-backend:ci ./backend
+        run: docker build -t azurelaunch-backend:ci ./backend
 
       - name: Run backend container
-        run: docker run -d --name backend -p 8000:8000 hello-backend:ci
+        run: docker run -d --name backend -p 8000:8000 azurelaunch-backend:ci
 
       - name: Wait for backend to start
-        run: sleep 8
+        run: |
+          echo "Waiting for backend..."
+          for i in {1..15}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            [ "$STATUS" = "200" ] && echo "Backend is up!" && break
+            sleep 3
+          done
 
       - name: Smoke test — GET /
         run: |
@@ -46,19 +53,30 @@ jobs:
           [ "$STATUS" = "200" ] || (echo "❌ Version endpoint failed" && exit 1)
           echo "✅ Version OK"
 
-      - name: Cleanup
+      - name: Show backend logs if failed
+        if: failure()
+        run: docker logs backend || true
+
+      - name: Cleanup backend
         if: always()
         run: docker rm -f backend || true
 
       # ── Build frontend ─────────────────────────
       - name: Build frontend Docker image
-        run: docker build -t hello-frontend:ci ./frontend
+        run: docker build -t azurelaunch-frontend:ci ./frontend
 
       - name: Run frontend container
-        run: docker run -d --name frontend -p 8080:80 hello-frontend:ci
+        run: docker run -d --name frontend -p 8080:80 azurelaunch-frontend:ci
 
       - name: Wait for frontend to start
-        run: sleep 5
+        run: |
+          echo "Waiting for frontend..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            [ "$STATUS" = "200" ] && echo "Frontend is up!" && break
+            sleep 2
+          done
 
       - name: Smoke test — frontend /health
         run: |
@@ -66,6 +84,10 @@ jobs:
           echo "Frontend /health → HTTP $STATUS"
           [ "$STATUS" = "200" ] || (echo "❌ Frontend health failed" && exit 1)
           echo "✅ Frontend OK"
+
+      - name: Show frontend logs if failed
+        if: failure()
+        run: docker logs frontend || true
 
       - name: Cleanup frontend
         if: always()
